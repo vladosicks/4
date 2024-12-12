@@ -1,0 +1,150 @@
+#include <windows.h>
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <iomanip>
+#include <chrono>
+
+void getFileAttributes(const std::wstring& filePath) {
+    WIN32_FILE_ATTRIBUTE_DATA fileInfo;
+    if (!GetFileAttributesEx(filePath.c_str(), GetFileExInfoStandard, &fileInfo)) {
+        std::wcerr << L"Failed to get file attributes for " << filePath << L". Error: " << GetLastError() << std::endl;
+        return;
+    }
+
+    // File size
+    LARGE_INTEGER fileSize;
+    fileSize.LowPart = fileInfo.nFileSizeLow;
+    fileSize.HighPart = fileInfo.nFileSizeHigh;
+    
+    // File times
+    FILETIME creationTime = fileInfo.ftCreationTime;
+    FILETIME accessTime = fileInfo.ftLastAccessTime;
+    FILETIME writeTime = fileInfo.ftLastWriteTime;
+
+    SYSTEMTIME creationSystemTime, accessSystemTime, writeSystemTime;
+    FileTimeToSystemTime(&creationTime, &creationSystemTime);
+    FileTimeToSystemTime(&accessTime, &accessSystemTime);
+    FileTimeToSystemTime(&writeTime, &writeSystemTime);
+
+    std::wcout << L"File: " << filePath << std::endl;
+    std::wcout << L"Size: " << fileSize.QuadPart << L" bytes" << std::endl;
+    std::wcout << L"Created: " << creationSystemTime.wYear << L"-" << creationSystemTime.wMonth << L"-" << creationSystemTime.wDay << std::endl;
+    std::wcout << L"Last Accessed: " << accessSystemTime.wYear << L"-" << accessSystemTime.wMonth << L"-" << accessSystemTime.wDay << std::endl;
+    std::wcout << L"Last Modified: " << writeSystemTime.wYear << L"-" << writeSystemTime.wMonth << L"-" << writeSystemTime.wDay << std::endl;
+
+    // File attributes
+    DWORD attributes = fileInfo.dwFileAttributes;
+    if (attributes & FILE_ATTRIBUTE_READONLY) std::wcout << L"Readonly" << std::endl;
+    if (attributes & FILE_ATTRIBUTE_HIDDEN) std::wcout << L"Hidden" << std::endl;
+    if (attributes & FILE_ATTRIBUTE_SYSTEM) std::wcout << L"System" << std::endl;
+}
+
+void readLargeFileC(const std::string& filePath, const std::string& outputPath) {
+    FILE* inFile = fopen(filePath.c_str(), "rb");
+    FILE* outFile = fopen(outputPath.c_str(), "wb");
+
+    if (!inFile || !outFile) {
+        std::cerr << "Error opening file." << std::endl;
+        return;
+    }
+
+    const size_t bufferSize = 4096;
+    char buffer[bufferSize];
+    size_t bytesRead;
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    while ((bytesRead = fread(buffer, 1, bufferSize, inFile)) > 0) {
+        fwrite(buffer, 1, bytesRead, outFile);
+    }
+
+    auto end = std::chrono::high_resolution_clock::now();
+    fclose(inFile);
+    fclose(outFile);
+
+    std::cout << "C Library I/O Time: " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << " ms" << std::endl;
+}
+
+void readLargeFileWindows(const std::wstring& filePath, const std::wstring& outputPath) {
+    HANDLE inFile = CreateFile(filePath.c_str(), GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE outFile = CreateFile(outputPath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+    if (inFile == INVALID_HANDLE_VALUE || outFile == INVALID_HANDLE_VALUE) {
+        std::cerr << "Error opening file." << std::endl;
+        return;
+    }
+
+    const DWORD bufferSize = 4096;
+    char buffer[bufferSize];
+    DWORD bytesRead, bytesWritten;
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    while (ReadFile(inFile, buffer, bufferSize, &bytesRead, NULL) && bytesRead > 0) {
+        WriteFile(outFile, buffer, bytesRead, &bytesWritten, NULL);
+    }
+
+    auto end = std::chrono::high_resolution_clock::now();
+    CloseHandle(inFile);
+    CloseHandle(outFile);
+
+    std::cout << "Windows API I/O Time: " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << " ms" << std::endl;
+}
+
+void asynchronousIO(const std::vector<std::wstring>& files) {
+    std::vector<HANDLE> events;
+    std::vector<OVERLAPPED> overlappedStructs(files.size());
+    std::vector<HANDLE> fileHandles;
+
+    for (size_t i = 0; i < files.size(); ++i) {
+        HANDLE file = CreateFile(files[i].c_str(), GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+        if (file == INVALID_HANDLE_VALUE) {
+            std::cerr << "Error opening file " << i << std::endl;
+            return;
+        }
+
+        HANDLE event = CreateEvent(NULL, TRUE, FALSE, NULL);
+        if (!event) {
+            std::cerr << "Error creating event." << std::endl;
+            return;
+        }
+
+        overlappedStructs[i].hEvent = event;
+        events.push_back(event);
+        fileHandles.push_back(file);
+    }
+
+    for (size_t i = 0; i < files.size(); ++i) {
+        char buffer[4096];
+        DWORD bytesRead;
+        ReadFile(fileHandles[i], buffer, sizeof(buffer), &bytesRead, &overlappedStructs[i]);
+    }
+
+    WaitForMultipleObjects(static_cast<DWORD>(events.size()), events.data(), TRUE, INFINITE);
+
+    for (HANDLE file : fileHandles) CloseHandle(file);
+    for (HANDLE event : events) CloseHandle(event);
+
+    std::cout << "Asynchronous I/O completed for all files." << std::endl;
+}
+
+int main() {
+    std::wstring filePath = L"testfile.txt";
+    std::wstring outputPath = L"outputfile.txt";
+
+    std::wcout << L"Getting file attributes:" << std::endl;
+    getFileAttributes(filePath);
+
+    std::cout << "\nReading large file with C Library:" << std::endl;
+    readLargeFileC("testfile.txt", "outputfile_c.txt");
+
+    std::cout << "\nReading large file with Windows API:" << std::endl;
+    readLargeFileWindows(L"testfile.txt", L"outputfile_winapi.txt");
+
+    std::cout << "\nPerforming asynchronous I/O:" << std::endl;
+    asynchronousIO({L"testfile1.txt", L"testfile2.txt", L"testfile3.txt"});
+
+    return 0;
+}
